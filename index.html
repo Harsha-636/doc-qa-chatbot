@@ -526,5 +526,22 @@ function resetApp() {
 
 function esc(s) { const d = document.createElement('div'); d.appendChild(document.createTextNode(String(s||''))); return d.innerHTML; }
 </script>
-</body>
+</body><!-- WAKE UP BANNER -->
+<div id="wake-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#7c6fff;color:white;text-align:center;padding:10px;font-family:sans-serif;font-size:0.88rem;font-weight:600">
+  ⏳ App is waking up from sleep — please wait 20–30 seconds...
+  <span id="wake-countdown" style="margin-left:8px;opacity:0.8"></span>
+</div>
+<script>
+(function(){
+  const b = document.getElementById('wake-banner');
+  const start = Date.now();
+  b.style.display = 'block';
+  let t = 30;
+  const i = setInterval(() => {
+    document.getElementById('wake-countdown').textContent = '(' + t-- + 's)';
+    if(t < 0 || (Date.now() - start) > 35000){ b.style.display='none'; clearInterval(i); }
+  }, 1000);
+  fetch('/api/health').then(() => { b.style.display='none'; clearInterval(i); }).catch(()=>{});
+})();
+</script>
 </html>
