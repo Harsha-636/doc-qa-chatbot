@@ -12,8 +12,8 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 sessions = {}
 
@@ -52,7 +52,6 @@ def get_mock_embedding(text):
     return np.random.rand(768).tolist()
 
 def get_embedding(text):
-    # Use mock embeddings to save Gemini quota for chat
     return get_mock_embedding(text)
 
 def cosine_similarity(a, b):
@@ -72,32 +71,26 @@ def retrieve_chunks(query, session_id, top_k=4):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:top_k]]
 
-def call_gemini_chat(messages):
-    if not GEMINI_API_KEY:
-        return "Gemini API key not configured."
+def call_claude(prompt):
+    if not ANTHROPIC_API_KEY:
+        return "API key not configured."
     try:
-        contents = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
         res = requests.post(
-            f"{GEMINI_CHAT_URL}?key={GEMINI_API_KEY}",
-            headers={"Content-Type": "application/json"},
-            json={"contents": contents,
-                  "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024}},
+            ANTHROPIC_URL,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": prompt}]
+            },
             timeout=30
         )
-        if res.status_code == 429:
-            time.sleep(5)
-            res = requests.post(
-                f"{GEMINI_CHAT_URL}?key={GEMINI_API_KEY}",
-                headers={"Content-Type": "application/json"},
-                json={"contents": contents,
-                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024}},
-                timeout=30
-            )
         res.raise_for_status()
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return res.json()["content"][0]["text"].strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -146,7 +139,7 @@ def upload():
 {{"title":"document title","summary":"2-3 sentence overview","key_topics":["topic1","topic2","topic3","topic4"],"document_type":"textbook/report/manual/research/other","suggested_questions":["question1?","question2?","question3?","question4?"]}}
 Document: {sample_text}"""
 
-    summary_response = call_gemini_chat([{"role": "user", "content": summary_prompt}])
+    summary_response = call_claude(summary_prompt)
     try:
         clean = summary_response.replace("```json","").replace("```","").strip()
         doc_info = json.loads(clean)
@@ -194,21 +187,26 @@ def chat():
         f"[Page {c['page']}]: {c['text']}" for c in relevant_chunks
     ])
 
-    system_prompt = f"""You are a helpful document assistant. Answer ONLY from the document context below.
+    history_text = ""
+    for h in session["history"][-4:]:
+        role = "User" if h["role"] == "user" else "Assistant"
+        history_text += f"{role}: {h['content']}\n\n"
+
+    prompt = f"""You are a helpful document assistant. Answer ONLY from the document context below.
 If the answer is not in the document, say "This information is not found in the document."
 Mention page numbers when referencing content. Be clear and concise.
 
 Document: {session['doc_info'].get('title','Uploaded Document')}
 
-CONTEXT:
-{context}"""
+DOCUMENT CONTEXT:
+{context}
 
-    messages = [{"role": "user", "content": system_prompt}]
-    for h in session["history"][-4:]:
-        messages.append(h)
-    messages.append({"role": "user", "content": question})
+CONVERSATION HISTORY:
+{history_text}
+User: {question}
+Assistant:"""
 
-    answer = call_gemini_chat(messages)
+    answer = call_claude(prompt)
 
     session["history"].append({"role": "user", "content": question})
     session["history"].append({"role": "assistant", "content": answer})
@@ -224,7 +222,7 @@ CONTEXT:
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "gemini": bool(GEMINI_API_KEY), "sessions": len(sessions)})
+    return jsonify({"status": "ok", "anthropic": bool(ANTHROPIC_API_KEY), "sessions": len(sessions)})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
