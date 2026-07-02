@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import os, json, requests, re, uuid, time
+import os, json, requests, uuid, time
 from io import BytesIO
 import numpy as np
 
@@ -14,12 +14,10 @@ CORS(app)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
-GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
-# In-memory store: session_id -> {chunks, embeddings, metadata, history}
 sessions = {}
 
-# ── PDF EXTRACTION ──
 def extract_text(file_bytes):
     try:
         reader = PdfReader(BytesIO(file_bytes))
@@ -29,29 +27,31 @@ def extract_text(file_bytes):
             if text.strip():
                 pages.append({"text": text.strip(), "page": i + 1})
         return pages
-    except Exception as e:
+    except:
         return []
 
-def chunk_text(pages, chunk_size=500, overlap=100):
+def chunk_text(pages, chunk_size=400, overlap=80):
     chunks = []
     for page_data in pages:
-        text = page_data["text"]
-        words = text.split()
+        words = page_data["text"].split()
         i = 0
         while i < len(words):
             chunk_words = words[i:i + chunk_size]
-            chunk_text = " ".join(chunk_words)
-            if len(chunk_text.strip()) > 50:
+            chunk_str = " ".join(chunk_words)
+            if len(chunk_str.strip()) > 50:
                 chunks.append({
                     "id": str(uuid.uuid4())[:8],
-                    "text": chunk_text,
+                    "text": chunk_str,
                     "page": page_data["page"],
                     "word_count": len(chunk_words)
                 })
             i += chunk_size - overlap
     return chunks
 
-# ── EMBEDDINGS ──
+def get_mock_embedding(text):
+    np.random.seed(hash(text[:100]) % 2**31)
+    return np.random.rand(768).tolist()
+
 def get_embedding(text):
     if not GEMINI_API_KEY:
         return get_mock_embedding(text)
@@ -59,17 +59,23 @@ def get_embedding(text):
         res = requests.post(
             f"{GEMINI_EMBED_URL}?key={GEMINI_API_KEY}",
             headers={"Content-Type": "application/json"},
-            json={"model": "models/text-embedding-004", "content": {"parts": [{"text": text[:2000]}]}},
-            timeout=15
+            json={"model": "models/text-embedding-004",
+                  "content": {"parts": [{"text": text[:1500]}]}},
+            timeout=20
         )
+        if res.status_code == 429:
+            time.sleep(3)
+            res = requests.post(
+                f"{GEMINI_EMBED_URL}?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={"model": "models/text-embedding-004",
+                      "content": {"parts": [{"text": text[:1500]}]}},
+                timeout=20
+            )
         res.raise_for_status()
         return res.json()["embedding"]["values"]
     except:
         return get_mock_embedding(text)
-
-def get_mock_embedding(text):
-    np.random.seed(hash(text[:100]) % 2**31)
-    return np.random.rand(768).tolist()
 
 def cosine_similarity(a, b):
     a, b = np.array(a), np.array(b)
@@ -88,10 +94,9 @@ def retrieve_chunks(query, session_id, top_k=4):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:top_k]]
 
-# ── GEMINI CHAT ──
 def call_gemini_chat(messages):
     if not GEMINI_API_KEY:
-        return "Gemini API key not configured. Please add GEMINI_API_KEY environment variable."
+        return "Gemini API key not configured."
     try:
         contents = []
         for msg in messages:
@@ -104,12 +109,20 @@ def call_gemini_chat(messages):
                   "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024}},
             timeout=30
         )
+        if res.status_code == 429:
+            time.sleep(5)
+            res = requests.post(
+                f"{GEMINI_CHAT_URL}?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": contents,
+                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024}},
+                timeout=30
+            )
         res.raise_for_status()
         return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
-        return f"Error calling Gemini: {str(e)}"
+        return f"Error: {str(e)}"
 
-# ── ROUTES ──
 @app.route("/")
 def index():
     return open("index.html").read()
@@ -129,16 +142,18 @@ def upload():
     if not pages:
         return jsonify({"error": "Could not extract text. Make sure PDF is not a scanned image."}), 400
 
+    pages = pages[:15]
     chunks = chunk_text(pages)
     if not chunks:
         return jsonify({"error": "Could not process document"}), 400
 
+    chunks = chunks[:20]
     session_id = str(uuid.uuid4())[:12]
     embeddings = []
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         emb = get_embedding(chunk["text"])
         embeddings.append(emb)
-        time.sleep(0.05)
+        time.sleep(0.8)
 
     total_words = sum(c["word_count"] for c in chunks)
     sessions[session_id] = {
@@ -152,27 +167,21 @@ def upload():
         "created_at": time.time()
     }
 
-    # Auto-generate document summary
-    sample_text = " ".join([c["text"] for c in chunks[:3]])[:2000]
-    summary_prompt = f"""Analyze this document and respond in JSON only (no markdown):
-{{
-  "title": "document title or topic",
-  "summary": "2-3 sentence overview",
-  "key_topics": ["topic1", "topic2", "topic3", "topic4", "topic5"],
-  "document_type": "type of document (textbook/report/manual/research/other)",
-  "suggested_questions": ["question1?", "question2?", "question3?", "question4?"]
-}}
-Document text: {sample_text}"""
+    sample_text = " ".join([c["text"] for c in chunks[:2]])[:1500]
+    summary_prompt = f"""Analyze this document and respond in JSON only (no markdown, no backticks):
+{{"title":"document title","summary":"2-3 sentence overview","key_topics":["topic1","topic2","topic3","topic4"],"document_type":"textbook/report/manual/research/other","suggested_questions":["question1?","question2?","question3?","question4?"]}}
+Document: {sample_text}"""
 
+    time.sleep(1)
     summary_response = call_gemini_chat([{"role": "user", "content": summary_prompt}])
     try:
-        clean = summary_response.replace("```json", "").replace("```", "").strip()
+        clean = summary_response.replace("```json","").replace("```","").strip()
         doc_info = json.loads(clean)
     except:
         doc_info = {
-            "title": file.filename.replace(".pdf", ""),
-            "summary": f"Document with {len(pages)} pages and {total_words} words processed successfully.",
-            "key_topics": ["Document Content", "Key Information", "Main Topics"],
+            "title": file.filename.replace(".pdf",""),
+            "summary": f"Document with {len(pages)} pages processed successfully.",
+            "key_topics": ["Document Content","Key Information","Main Topics"],
             "document_type": "Document",
             "suggested_questions": [
                 "What is this document about?",
@@ -212,22 +221,17 @@ def chat():
         f"[Page {c['page']}]: {c['text']}" for c in relevant_chunks
     ])
 
-    system_prompt = f"""You are an intelligent document assistant. Answer questions based ONLY on the provided document context.
+    system_prompt = f"""You are a helpful document assistant. Answer ONLY from the document context below.
+If the answer is not in the document, say "This information is not found in the document."
+Mention page numbers when referencing content. Be clear and concise.
 
-Rules:
-- Answer based strictly on the document content
-- If the answer is not in the document, say "This information is not found in the document"
-- Be clear, concise and helpful
-- Mention page numbers when referencing specific content
-- Format your response with clear structure when needed
+Document: {session['doc_info'].get('title','Uploaded Document')}
 
-Document: {session['doc_info'].get('title', 'Uploaded Document')}
-
-DOCUMENT CONTEXT:
+CONTEXT:
 {context}"""
 
     messages = [{"role": "user", "content": system_prompt}]
-    for h in session["history"][-6:]:
+    for h in session["history"][-4:]:
         messages.append(h)
     messages.append({"role": "user", "content": question})
 
@@ -243,20 +247,6 @@ DOCUMENT CONTEXT:
         "source_pages": source_pages,
         "chunks_used": len(relevant_chunks),
         "question": question
-    })
-
-@app.route("/api/session/<session_id>", methods=["GET"])
-def get_session(session_id):
-    if session_id not in sessions:
-        return jsonify({"error": "Session not found"}), 404
-    s = sessions[session_id]
-    return jsonify({
-        "filename": s["filename"],
-        "total_pages": s["total_pages"],
-        "total_chunks": s["total_chunks"],
-        "total_words": s["total_words"],
-        "doc_info": s["doc_info"],
-        "history": s["history"]
     })
 
 @app.route("/api/health")
