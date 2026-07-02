@@ -13,7 +13,6 @@ app = Flask(__name__)
 CORS(app)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
 GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
 sessions = {}
@@ -53,29 +52,8 @@ def get_mock_embedding(text):
     return np.random.rand(768).tolist()
 
 def get_embedding(text):
-    if not GEMINI_API_KEY:
-        return get_mock_embedding(text)
-    try:
-        res = requests.post(
-            f"{GEMINI_EMBED_URL}?key={GEMINI_API_KEY}",
-            headers={"Content-Type": "application/json"},
-            json={"model": "models/text-embedding-004",
-                  "content": {"parts": [{"text": text[:1500]}]}},
-            timeout=20
-        )
-        if res.status_code == 429:
-            time.sleep(3)
-            res = requests.post(
-                f"{GEMINI_EMBED_URL}?key={GEMINI_API_KEY}",
-                headers={"Content-Type": "application/json"},
-                json={"model": "models/text-embedding-004",
-                      "content": {"parts": [{"text": text[:1500]}]}},
-                timeout=20
-            )
-        res.raise_for_status()
-        return res.json()["embedding"]["values"]
-    except:
-        return get_mock_embedding(text)
+    # Use mock embeddings to save Gemini quota for chat
+    return get_mock_embedding(text)
 
 def cosine_similarity(a, b):
     a, b = np.array(a), np.array(b)
@@ -149,11 +127,7 @@ def upload():
 
     chunks = chunks[:20]
     session_id = str(uuid.uuid4())[:12]
-    embeddings = []
-    for i, chunk in enumerate(chunks):
-        emb = get_embedding(chunk["text"])
-        embeddings.append(emb)
-        time.sleep(0.8)
+    embeddings = [get_embedding(c["text"]) for c in chunks]
 
     total_words = sum(c["word_count"] for c in chunks)
     sessions[session_id] = {
@@ -172,7 +146,6 @@ def upload():
 {{"title":"document title","summary":"2-3 sentence overview","key_topics":["topic1","topic2","topic3","topic4"],"document_type":"textbook/report/manual/research/other","suggested_questions":["question1?","question2?","question3?","question4?"]}}
 Document: {sample_text}"""
 
-    time.sleep(1)
     summary_response = call_gemini_chat([{"role": "user", "content": summary_prompt}])
     try:
         clean = summary_response.replace("```json","").replace("```","").strip()
@@ -181,7 +154,7 @@ Document: {sample_text}"""
         doc_info = {
             "title": file.filename.replace(".pdf",""),
             "summary": f"Document with {len(pages)} pages processed successfully.",
-            "key_topics": ["Document Content","Key Information","Main Topics"],
+            "key_topics": ["Document Content","Key Information","Main Topics","Key Findings"],
             "document_type": "Document",
             "suggested_questions": [
                 "What is this document about?",
