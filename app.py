@@ -12,8 +12,8 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 sessions = {}
 
@@ -71,34 +71,28 @@ def retrieve_chunks(query, session_id, top_k=3):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:top_k]]
 
-def call_gemini(prompt):
-    if not GEMINI_API_KEY:
-        return "Gemini API key not configured."
+def call_groq(prompt):
+    if not GROQ_API_KEY:
+        return "Groq API key not configured."
     try:
         prompt = prompt[:3000]
         res = requests.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            headers={"Content-Type": "application/json"},
+            GROQ_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROQ_API_KEY}"
+            },
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512}
+                "model": "llama3-8b-8192",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 512,
+                "temperature": 0.3
             },
             timeout=30
         )
-        if res.status_code == 429:
-            time.sleep(10)
-            res = requests.post(
-                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512}
-                },
-                timeout=30
-            )
         if res.status_code != 200:
             return f"API Error {res.status_code}: {res.text[:200]}"
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return res.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -145,8 +139,7 @@ def upload():
     sample_text = " ".join([c["text"] for c in chunks[:1]])[:800]
     summary_prompt = f'Analyze this text and respond in JSON only, no markdown: {{"title":"short title","summary":"one sentence summary","key_topics":["topic1","topic2","topic3"],"document_type":"document type","suggested_questions":["question1?","question2?","question3?","question4?"]}} Text: {sample_text}'
 
-    time.sleep(2)
-    summary_response = call_gemini(summary_prompt)
+    summary_response = call_groq(summary_prompt)
     try:
         clean = summary_response.replace("```json","").replace("```","").strip()
         doc_info = json.loads(clean)
@@ -203,8 +196,7 @@ Context:
 Question: {question}
 Answer:"""
 
-    time.sleep(2)
-    answer = call_gemini(prompt)
+    answer = call_groq(prompt)
 
     session["history"].append({"role": "user", "content": question})
     session["history"].append({"role": "assistant", "content": answer})
@@ -222,7 +214,7 @@ Answer:"""
 def health():
     return jsonify({
         "status": "ok",
-        "gemini": bool(GEMINI_API_KEY),
+        "groq": bool(GROQ_API_KEY),
         "sessions": len(sessions)
     })
 
