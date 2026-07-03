@@ -29,7 +29,7 @@ def extract_text(file_bytes):
     except:
         return []
 
-def chunk_text(pages, chunk_size=400, overlap=80):
+def chunk_text(pages, chunk_size=300, overlap=50):
     chunks = []
     for page_data in pages:
         words = page_data["text"].split()
@@ -37,7 +37,7 @@ def chunk_text(pages, chunk_size=400, overlap=80):
         while i < len(words):
             chunk_words = words[i:i + chunk_size]
             chunk_str = " ".join(chunk_words)
-            if len(chunk_str.strip()) > 50:
+            if len(chunk_str.strip()) > 30:
                 chunks.append({
                     "id": str(uuid.uuid4())[:8],
                     "text": chunk_str,
@@ -58,7 +58,7 @@ def cosine_similarity(a, b):
     a, b = np.array(a), np.array(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
 
-def retrieve_chunks(query, session_id, top_k=4):
+def retrieve_chunks(query, session_id, top_k=3):
     if session_id not in sessions:
         return []
     session = sessions[session_id]
@@ -75,22 +75,24 @@ def call_claude(prompt):
     if not ANTHROPIC_API_KEY:
         return "API key not configured."
     try:
+        # Limit prompt to 3000 chars to avoid 400 error
+        prompt = prompt[:3000]
         res = requests.post(
             ANTHROPIC_URL,
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-"anthropic-beta": "interleaved-thinking-2025-05-14"
+                "anthropic-version": "2023-06-01"
             },
             json={
                 "model": "claude-sonnet-4-6",
-                "max_tokens": 1024,
+                "max_tokens": 512,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=30
         )
-        res.raise_for_status()
+        if res.status_code != 200:
+            return f"API Error {res.status_code}: {res.text[:200]}"
         return res.json()["content"][0]["text"].strip()
     except Exception as e:
         return f"Error: {str(e)}"
@@ -112,14 +114,14 @@ def upload():
 
     pages = extract_text(file_bytes)
     if not pages:
-        return jsonify({"error": "Could not extract text. Make sure PDF is not a scanned image."}), 400
+        return jsonify({"error": "Could not extract text from PDF."}), 400
 
-    pages = pages[:15]
+    pages = pages[:10]
     chunks = chunk_text(pages)
     if not chunks:
         return jsonify({"error": "Could not process document"}), 400
 
-    chunks = chunks[:20]
+    chunks = chunks[:15]
     session_id = str(uuid.uuid4())[:12]
     embeddings = [get_embedding(c["text"]) for c in chunks]
 
@@ -135,10 +137,9 @@ def upload():
         "created_at": time.time()
     }
 
-    sample_text = " ".join([c["text"] for c in chunks[:2]])[:1500]
-    summary_prompt = f"""Analyze this document and respond in JSON only (no markdown, no backticks):
-{{"title":"document title","summary":"2-3 sentence overview","key_topics":["topic1","topic2","topic3","topic4"],"document_type":"textbook/report/manual/research/other","suggested_questions":["question1?","question2?","question3?","question4?"]}}
-Document: {sample_text}"""
+    # Short summary prompt - keep under 1000 chars
+    sample_text = " ".join([c["text"] for c in chunks[:1]])[:800]
+    summary_prompt = f'Analyze this document text and respond in JSON only, no markdown: {{"title":"short title","summary":"one sentence summary","key_topics":["topic1","topic2","topic3"],"document_type":"document type","suggested_questions":["question1?","question2?","question3?","question4?"]}} Text: {sample_text}'
 
     summary_response = call_claude(summary_prompt)
     try:
@@ -148,7 +149,7 @@ Document: {sample_text}"""
         doc_info = {
             "title": file.filename.replace(".pdf",""),
             "summary": f"Document with {len(pages)} pages processed successfully.",
-            "key_topics": ["Document Content","Key Information","Main Topics","Key Findings"],
+            "key_topics": ["Document Content","Key Information","Main Topics"],
             "document_type": "Document",
             "suggested_questions": [
                 "What is this document about?",
@@ -182,30 +183,22 @@ def chat():
         return jsonify({"error": "Question is empty"}), 400
 
     session = sessions[session_id]
-    relevant_chunks = retrieve_chunks(question, session_id, top_k=4)
+    relevant_chunks = retrieve_chunks(question, session_id, top_k=3)
 
-    context = "\n\n---\n\n".join([
-        f"[Page {c['page']}]: {c['text']}" for c in relevant_chunks
+    # Keep context short to avoid 400
+    context = "\n\n".join([
+        f"[Page {c['page']}]: {c['text'][:400]}" for c in relevant_chunks
     ])
 
-    history_text = ""
-    for h in session["history"][-4:]:
-        role = "User" if h["role"] == "user" else "Assistant"
-        history_text += f"{role}: {h['content']}\n\n"
+    prompt = f"""Answer this question based ONLY on the document context below. If not found say so. Be brief.
 
-    prompt = f"""You are a helpful document assistant. Answer ONLY from the document context below.
-If the answer is not in the document, say "This information is not found in the document."
-Mention page numbers when referencing content. Be clear and concise.
+Document: {session['doc_info'].get('title','Document')}
 
-Document: {session['doc_info'].get('title','Uploaded Document')}
+Context:
+{context[:1500]}
 
-DOCUMENT CONTEXT:
-{context}
-
-CONVERSATION HISTORY:
-{history_text}
-User: {question}
-Assistant:"""
+Question: {question}
+Answer:"""
 
     answer = call_claude(prompt)
 
@@ -223,7 +216,12 @@ Assistant:"""
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "anthropic": bool(ANTHROPIC_API_KEY), "sessions": len(sessions)})
+    return jsonify({
+        "status": "ok",
+        "anthropic": bool(ANTHROPIC_API_KEY),
+        "key_prefix": ANTHROPIC_API_KEY[:12] + "..." if ANTHROPIC_API_KEY else "NOT SET",
+        "sessions": len(sessions)
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
