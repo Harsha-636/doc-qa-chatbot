@@ -80,10 +80,11 @@ def call_claude(prompt):
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01"
+                "anthropic-version": "2023-06-01",
+"anthropic-beta": "interleaved-thinking-2025-05-14"
             },
             json={
-                "model": "claude-haiku-4-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 1024,
                 "messages": [{"role": "user", "content": prompt}]
             },
