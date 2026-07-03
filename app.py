@@ -12,8 +12,8 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
 sessions = {}
 
@@ -71,29 +71,34 @@ def retrieve_chunks(query, session_id, top_k=3):
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:top_k]]
 
-def call_claude(prompt):
-    if not ANTHROPIC_API_KEY:
-        return "API key not configured."
+def call_gemini(prompt):
+    if not GEMINI_API_KEY:
+        return "Gemini API key not configured."
     try:
-        # Limit prompt to 3000 chars to avoid 400 error
         prompt = prompt[:3000]
         res = requests.post(
-            ANTHROPIC_URL,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01"
-            },
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            headers={"Content-Type": "application/json"},
             json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 512,
-                "messages": [{"role": "user", "content": prompt}]
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512}
             },
             timeout=30
         )
+        if res.status_code == 429:
+            time.sleep(10)
+            res = requests.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512}
+                },
+                timeout=30
+            )
         if res.status_code != 200:
             return f"API Error {res.status_code}: {res.text[:200]}"
-        return res.json()["content"][0]["text"].strip()
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -137,11 +142,11 @@ def upload():
         "created_at": time.time()
     }
 
-    # Short summary prompt - keep under 1000 chars
     sample_text = " ".join([c["text"] for c in chunks[:1]])[:800]
-    summary_prompt = f'Analyze this document text and respond in JSON only, no markdown: {{"title":"short title","summary":"one sentence summary","key_topics":["topic1","topic2","topic3"],"document_type":"document type","suggested_questions":["question1?","question2?","question3?","question4?"]}} Text: {sample_text}'
+    summary_prompt = f'Analyze this text and respond in JSON only, no markdown: {{"title":"short title","summary":"one sentence summary","key_topics":["topic1","topic2","topic3"],"document_type":"document type","suggested_questions":["question1?","question2?","question3?","question4?"]}} Text: {sample_text}'
 
-    summary_response = call_claude(summary_prompt)
+    time.sleep(2)
+    summary_response = call_gemini(summary_prompt)
     try:
         clean = summary_response.replace("```json","").replace("```","").strip()
         doc_info = json.loads(clean)
@@ -160,7 +165,6 @@ def upload():
         }
 
     sessions[session_id]["doc_info"] = doc_info
-
     return jsonify({
         "success": True,
         "session_id": session_id,
@@ -185,7 +189,6 @@ def chat():
     session = sessions[session_id]
     relevant_chunks = retrieve_chunks(question, session_id, top_k=3)
 
-    # Keep context short to avoid 400
     context = "\n\n".join([
         f"[Page {c['page']}]: {c['text'][:400]}" for c in relevant_chunks
     ])
@@ -200,7 +203,8 @@ Context:
 Question: {question}
 Answer:"""
 
-    answer = call_claude(prompt)
+    time.sleep(2)
+    answer = call_gemini(prompt)
 
     session["history"].append({"role": "user", "content": question})
     session["history"].append({"role": "assistant", "content": answer})
@@ -218,8 +222,7 @@ Answer:"""
 def health():
     return jsonify({
         "status": "ok",
-        "anthropic": bool(ANTHROPIC_API_KEY),
-        "key_prefix": ANTHROPIC_API_KEY[:12] + "..." if ANTHROPIC_API_KEY else "NOT SET",
+        "gemini": bool(GEMINI_API_KEY),
         "sessions": len(sessions)
     })
 
